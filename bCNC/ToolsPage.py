@@ -399,7 +399,8 @@ class _Base:
 		else:
 			for var in self.variables:
 				n, t, d, l = var[:4]
-				Utils.setStr(self.name, n, str(self.values.get(n,d)))
+				val = Utils.to_unicode(self.values.get(n,d))
+				Utils.setStr(self.name, n, str(val))
 
 	# ----------------------------------------------------------------------
 	def fromMm(self, name, default=0.0):
@@ -994,7 +995,7 @@ class Controller(_Base):
 		_Base.__init__(self, master)
 		self.name = "Controller"
 		self.variables = [
-			("grbl_0",   "int",     10,     _("$0 Step pulse time [us]")),
+			("grbl_0",   "float",   10,     _("$0 Step pulse time [us]")),
 			("grbl_1",   "int",     25,     _("$1 Step idle delay [ms]")),
 			("grbl_2",   "int",      0,     _("$2 Step port invert [mask]")),
 			("grbl_3",   "int",      0,     _("$3 Direction port invert [mask]")),
@@ -1723,11 +1724,11 @@ class ToolsFrame(CNCRibbon.PageFrame):
 		for var in self.tools.getActive().variables:
 			if var[3] == item or _(var[3]) == item:
 				varname = var[0]
-				helpname = "Help for ("+varname+") "+item
+				helpname = 'Help for (%s) %s'%(varname,item)
 				if len(var) > 4 and var[4] is not None:
 					helptext = var[4]
 				else:
-					helptext = helpname+':\nnot available yet!'
+					helptext = '%s:\nnot available yet!'%(helpname)
 				tkMessageBox.showinfo(helpname, helptext)
 
 	#----------------------------------------------------------------------

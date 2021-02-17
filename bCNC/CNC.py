@@ -23,6 +23,7 @@ from bpath	import eq,Path, Segment
 from bmath	import *
 from copy	import deepcopy
 from svgcode	import SVGcode
+from Utils import to_zip
 
 IDPAT    = re.compile(r".*\bid:\s*(.*?)\)")
 PARENPAT = re.compile(r"(\(.*?\))")
@@ -1039,7 +1040,7 @@ class CNC:
 	#----------------------------------------------------------------------
 	@staticmethod
 	def glinev(g, v, feed=None):
-		pairs = zip("xyz",v)
+		pairs = to_zip("xyz",v)
 		if feed is not None:
 			pairs.append(("f",feed))
 		return CNC.gcode(g, pairs)
@@ -1047,7 +1048,7 @@ class CNC:
 	#----------------------------------------------------------------------
 	@staticmethod
 	def garcv(g, v, ijk):
-		return CNC.gcode(g, zip("xyz",v) + zip("ij",ijk[:2]))
+		return CNC.gcode(g, to_zip("xyz",v) + to_zip("ij",ijk[:2]))
 
 	#----------------------------------------------------------------------
 	@staticmethod
@@ -1676,6 +1677,9 @@ class CNC:
 			block.time += length / self.feedmax_x
 			self.totalTime += length / self.feedmax_x
 			block.rapid += length
+		elif (self.gcode == 1 or self.gcode==2 or self.gcode==3) and self.feed >0 :
+			block.time += length / self.feed
+			self.totalTime += length / self.feed
 		else:
 			try:
 				if CNC.vars["feedmode"] == 94:
@@ -1684,7 +1688,6 @@ class CNC:
 				elif CNC.vars["feedmode"] == 93:
 					# Inverse mode
 					t = length * self.feed
-
 				block.time += t
 				self.totalTime += t
 			except:
@@ -2504,10 +2507,10 @@ class GCode:
 	#----------------------------------------------------------------------
 	# Get scaling factor for SVG files
 	#----------------------------------------------------------------------
-	def SVGscale(self):
-		dpi=96 #same as inkscape 0.9x (according to jscut)
-		if not CNC.inch: dpi = round(dpi/25.4,7)
-		return dpi
+	def SVGscale(self, dpi=96.0): #same as inkscape 0.9x (according to jscut)
+		if CNC.inch:
+			return 1.0 / dpi
+		return 25.4 / dpi
 
 	#----------------------------------------------------------------------
 	# Load SVG file into gcode
@@ -2521,8 +2524,11 @@ class GCode:
 		empty = len(self.blocks)==0
 		if empty: self.addBlockFromString("Header",self.header)
 
-		#FIXME: UI to set SVG subdivratio
-		for path in svgcode.get_gcode(self.SVGscale(), 0.5, CNC.digits):
+		#FIXME: UI to set SVG samples_per_unit
+		ppi = 96.0  # 96 pixels per inch.
+		scale = self.SVGscale(ppi)
+		samples_per_unit = 200.0
+		for path in svgcode.get_gcode(scale, samples_per_unit, CNC.digits, ppi=ppi):
 			self.addBlockFromString(path['id'],path['path'])
 
 		if empty: self.addBlockFromString("Footer",self.footer)
@@ -4100,7 +4106,7 @@ class GCode:
 		blocks.extend(newblocks)
 		return msg
 
-    #----------------------------------------------------------------------
+	#----------------------------------------------------------------------
 	# make a trochoidal profile on block
 	# offset +/- defines direction = tool/2
 	# return new blocks inside the blocks list
