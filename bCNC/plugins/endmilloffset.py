@@ -9,12 +9,13 @@ from __future__ import print_function
 __author__ = "@DodoLaSaumure  (Pierre Klein)"
 #__email__  = ""
 
-__name__ = _("PocketIsland")
+__name__ = _("Offset")
 __version__ = "0.0.1"
 
 import math
 import os.path
 import re
+import sys
 from CNC import CNC,Block#,toPath,importPath,addUndo
 from ToolsPage import Plugin
 from math import pi, sqrt, sin, cos, asin, acos, atan2, hypot, degrees, radians, copysign, fmod
@@ -36,7 +37,7 @@ except ImportError:
 
 def pocket(selectedblocks, RecursiveDepth,ProfileDir,CutDir,AdditionalCut,Overcuts, CustomRecursiveDepth,
 		ignoreIslands,
-		allowG1, diameter, stepover, name,gcode):
+		allowG1, diameter, stepover, name,gcode,app):
 	undoinfo = []
 	msg = ""
 	newblocks = []
@@ -68,7 +69,6 @@ def pocket(selectedblocks, RecursiveDepth,ProfileDir,CutDir,AdditionalCut,Overcu
 					if msg: msg += "\n"
 					msg += m
 				path.close()
-
 			# Remove tiny segments
 			path.removeZeroLength(abs(diameter)/100.)
 			# Convert very small arcs to lines
@@ -78,7 +78,7 @@ def pocket(selectedblocks, RecursiveDepth,ProfileDir,CutDir,AdditionalCut,Overcu
 		MyPocket = PocketIsland(outpathslist,RecursiveDepth,ProfileDir,CutDir,AdditionalCut,
 							Overcuts,CustomRecursiveDepth,
 							ignoreIslands,
-							allowG1,diameter,stepover,0,islandslist)
+							allowG1,diameter,stepover,0,app,islandslist)
 		newpathList =  MyPocket.getfullpath()
 		#concatenate newpath in a single list and split2contours
 		if allowG1 :
@@ -98,7 +98,6 @@ def pocket(selectedblocks, RecursiveDepth,ProfileDir,CutDir,AdditionalCut,Overcu
 				newblocks[i] += new
 			allblocks[bid].enable = False
 	gcode.addUndo(undoinfo)
-
 	# return new blocks inside the blocks list
 	del selectedblocks[:]
 	selectedblocks.extend(newblocks)
@@ -107,7 +106,7 @@ def pocket(selectedblocks, RecursiveDepth,ProfileDir,CutDir,AdditionalCut,Overcu
 class PocketIsland:
 	def __init__(self,pathlist,RecursiveDepth,ProfileDir,CutDir,AdditionalCut, Overcuts,CustomRecursiveDepth,
 				ignoreIslands,
-				allowG1,diameter,stepover,depth,islandslist=[]):
+				allowG1,diameter,stepover,depth,app,islandslist=[]):
 		self.outpaths = pathlist
 		self.islands = islandslist
 		self.diameter = diameter
@@ -126,25 +125,33 @@ class PocketIsland:
 		self.outPathG1SegList = Path("outPathG1SegList")
 		self.ignoreIslands = ignoreIslands
 		self.allowG1 = allowG1
+		self.app = app
 		maxdepthchoice = {"Single profile":0,
-						"Custom recursive depth":int(self.CustomRecursiveDepth-1),
+						"Custom offset count":int(self.CustomRecursiveDepth-1),
 						"Full pocket":100}
 		profileDirChoice = {"inside":1.,"outside":-1.}
-		cutDirChoice = {"conventional milling":1.,"climbing milling":-1.}
+		cutDirChoice = {False:1.,True:-1.}
 		self.selectCutDir = cutDirChoice.get(self.CutDir,1.)
 		self.profiledir = profileDirChoice.get(self.ProfileDir,1.)
 		if self.RecursiveDepth=="Full pocket" :
 			self.profiledir=1.#to avoid making full pockets, with full recursive depth, outside the path
 		maxdepth=maxdepthchoice.get(self.RecursiveDepth,0)
-		import sys
-		sys.setrecursionlimit(max(sys.getrecursionlimit(),maxdepth+10))
+		maxdepth = min(maxdepth,999)
+		sys.setrecursionlimit(max(sys.getrecursionlimit(),maxdepth+1))
 		if depth>maxdepth: return None
+		self.app.setStatus(_("Generate pocket path")+" - depth:"+str(self.depth+1)+" -> eliminateOutsideIslands",True)
 		self.eliminateOutsideIslands()
+		self.app.setStatus(_("Generate pocket path")+" - depth:"+str(self.depth+1)+" -> inoutprofile",True)
 		self.inoutprofile()
+		self.app.setStatus(_("Generate pocket path")+" - depth:"+str(self.depth+1)+" -> removeOutofProfileLinkingSegs",True)
 		self.removeOutofProfileLinkingSegs()
+		self.app.setStatus(_("Generate pocket path")+" - depth:"+str(self.depth+1)+" -> interesect",True)
 		self.interesect()
+		self.app.setStatus(_("Generate pocket path")+" - depth:"+str(self.depth+1)+" -> removeOutOfProfile",True)
 		self.removeOutOfProfile()
+		self.app.setStatus(_("Generate pocket path")+" - depth:"+str(self.depth+1)+" -> removeInsideIslands",True)
 		self.removeInsideIslands()
+		self.app.setStatus(_("Generate pocket path")+" - depth:"+str(self.depth+1)+" -> getNewPathAndIslands",True)
 		self.getNewPathAndIslands()
 		self.getPaths()
 		if len (self.CleanPath)>0:
@@ -160,8 +167,10 @@ class PocketIsland:
 	def inoutprofile(self):
 		if self.depth == 0:
 			self.offset = -self.diameter / 2.0 +self.AdditionalCut
+			self.offsetLastPass = self.offset
 		else:
 			self.offset = -self.diameter*self.stepover
+			self.offsetLastPass = -min(self.diameter*self.stepover/2.,self.diameter*0.49)
 		self.OutOffsetPathList = []
 		for path in self.outpaths :
 			p1=p2=None
@@ -170,9 +179,21 @@ class PocketIsland:
 			if self.depth == 0 :
 				path.directionSet(self.selectCutDir*float(self.profiledir))
 			direct = path.direction()
-			opath = path.offset(self.profiledir*self.offset*float(direct))
+			opathCopy = path.offset(self.profiledir*self.offset*float(direct))
+			points = opathCopy.intersectSelf()
+			opathCopy.removeExcluded(path, abs(self.offset))
+			if  len(opathCopy)>0: #there remains some path after full offset : not the last pass
+				opath = path.offset(self.profiledir*self.offset*float(direct))
+				offset = self.offset
+			else:# nothing remaining after the last pass => apply offsetLastPass
+				opath = path.offset(self.profiledir*self.offsetLastPass*float(direct))
+				offset = self.offsetLastPass
 			opath.intersectSelf()
-			opath.removeExcluded(path, abs(self.offset))
+			if len (opath)>0 :
+				opath.removeExcluded(path, abs(offset))
+			opath.removeZeroLength(abs(self.diameter)/100.)
+# 			opath.removeZeroLength(abs(EPS*10.))
+			opath.convert2Lines(abs(self.diameter)/10.)
 			if self.depth == 0 and self.Overcuts :
 				opath.overcut(self.profiledir*self.offset*float(direct))
 			if len(opath)>0:
@@ -189,12 +210,16 @@ class PocketIsland:
 				island.directionSet(-self.selectCutDir*float(self.profiledir))
 			direct = island.direction()
 			offIsl = island.offset(-self.profiledir*self.offset*float(direct))
+			offIsl.intersectSelf()
+			if len(offIsl)>0 :
+				offIsl.removeExcluded(island, abs(self.offset))
+			offIsl.removeZeroLength(abs(self.diameter)/100.)
+# 			offIsl.removeZeroLength(abs(EPS*10.))
+			offIsl.convert2Lines(abs(self.diameter)/10.)
 			if len(offIsl)>0:
 				p4 = offIsl[0].A
 			if self.depth >0 and p3 is not None and p4 is not None :
 				self.islandG1SegList.append(Segment(Segment.LINE,p3,p4))
-			offIsl.intersectSelf()
-			offIsl.removeExcluded(island, abs(self.offset))
 			if self.depth == 0 and self.Overcuts :
 				offIsl.overcut(-self.profiledir*self.offset*float(direct))
 			self.islandOffPaths.append(offIsl)
@@ -289,7 +314,7 @@ class PocketIsland:
 		pcket = PocketIsland(self.childrenOutpath,self.RecursiveDepth,self.ProfileDir,
 							self.CutDir,self.AdditionalCut,self.Overcuts, self.CustomRecursiveDepth,
 							self.ignoreIslands,
-							self.allowG1,self.diameter,self.stepover,self.depth+1,self.childrenIslands)
+							self.allowG1,self.diameter,self.stepover,self.depth+1,self.app,self.childrenIslands)
 		self.fullpath.extend(pcket.getfullpath())
 
 	def getfullpath(self) :
@@ -297,34 +322,41 @@ class PocketIsland:
 
 
 class Tool(Plugin):
-	__doc__ = _("Generate a pocket with Inside Islands")
+	__doc__ = _("Generate a pocket or profile for selected shape (regarding islands)")
 
 	def __init__(self, master):
-		Plugin.__init__(self, master, "PocketIsland")
-		self.icon  = "pocketisland"
-		self.group = "Development"
+		Plugin.__init__(self, master, "Offset")
+		self.icon  = "offset"
+		self.group = "CAM_Core+"
 		self.variables = [
 			("name",      "db" ,    "", _("Name")),
 			("endmill",   "db" ,    "", _("End Mill")),
-			("RecursiveDepth","Single profile,Full pocket,Custom recursive depth", "Single profile",  _("Recursive depth")),
-			("CustomRecursiveDepth","int",1,_("Nb of contours (Custom Recursive Depth)")),
-			("ProfileDir","inside,outside", "inside",  _("Profile direction if profile option selected")),
-			("CutDir","conventional milling,climbing milling", "conventional milling",  _("Cut Direction,default is conventional")),
-			("AdditionalCut"  ,         "mm" ,     0., _("Additional cut inside profile")),
-			("Overcuts"  ,         "bool" ,     False, _("Overcuts inside corners")),
+			("RecursiveDepth","Single profile,Full pocket,Custom offset count", "Single profile",  _("Operation"), _('indicates the number of profile passes (single,custom number,full pocket)')),
+			("CustomRecursiveDepth","int",2,_("Custom offset count"), _('Number of contours (Custom offset count) : indicates the number of contours if custom selected. MAX:'+str(sys.getrecursionlimit()-1)) ),
+			("ProfileDir","inside,outside", "inside",  _("Offset side"), _('indicates the direction (inside / outside) for making profiles')),
+			("CutDir","bool", False,  _("Climb milling"), _('This can be used to switch between Conventional and Climb milling. If unsure use Convetional (default).')),
+			("AdditionalCut"  ,         "mm" ,     0., _("Additional offset (mm)"), _('acts like a tool corrector inside the profile')),
+			("Overcuts"  ,         "bool" ,     False, _("Overcut corners"), _('Tabs are always ignored. You can select if all islands are active, none, or only selected')),
 			("ignoreIslands",
 				"Regard all islands except tabs,Ignore all islands,Regard only selected islands",
-				"Regard all islands except tabs",_("Ignore islands)")),
-			("allowG1",        "bool",    True, _("allow pocket paths linking segments(default yes)")),
-		
+				"Regard all islands except tabs",_("Island behaviour"), _('Tabs are always ignored. You can select if all islands are active, none, or only selected')),
+			("allowG1",        "bool",    True, _("Link segments"), _('Currently there is some weird behaviour sometimes when trying to link segments of pocket internally, so it can be disabled using this option. This workaround should be fixed and removed in future.')),
+
 		]
-		self.help="""- Recursive depth : indicates the number of profile passes (single,custom number,full pocket)
-- Nb of contours (Custom Recursive Depth) : indicates the number of contours if custom selected
-- Profile direction : indicates the direction (inside / outside) for making profiles
-- Cut Direction,default is conventional
-- Additional cut inside profile : acts like a tool corrector inside the profile
-- Overcuts inside corners : Overcuts allow milling in the corners of a box
-- Ignore islands : Tabs are always ignored. You can select if all islands are active, none, or only selected
+		self.help="""This plugin offsets shapes to create toolpaths for profiling and pocketing operation.
+Shape needs to be offset by the radius of endmill to get cut correctly.
+
+Currently we have two modes.
+
+Without overcut:
+#overcut-without
+
+And with overcut:
+#overcut-with
+
+Blue is the original shape from CAD
+Turquoise is the generated toolpath
+Grey is simulation of how part will look after machining
 		"""
 		self.buttons.append("exe")
 	# ----------------------------------------------------------------------
@@ -347,14 +379,13 @@ class Tool(Plugin):
 			stepover = tool["stepover"] / 100.0
 		except TypeError:
 			stepover = 0.
-
 		app.busy()
 		selectedblocks = app.editor.getSelectedBlocks()
 		msg = pocket(selectedblocks,RecursiveDepth,ProfileDir,CutDir,
 					AdditionalCut, Overcuts,CustomRecursiveDepth,
 					ignoreIslands,
 					bool(allowG1), diameter, stepover,
-					name,gcode = app.gcode)
+					name,app.gcode,app)
 		if msg:
 			tkMessageBox.showwarning(_("Open paths"),
 					_("WARNING: %s")%(msg),
@@ -363,6 +394,6 @@ class Tool(Plugin):
 		app.editor.selectBlocks(selectedblocks)
 		app.draw()
 		app.notBusy()
-		app.setStatus(_("Generate pocket path"))
+		app.setStatus(_("Generate pocket path")+"..done")
 
 ##############################################
